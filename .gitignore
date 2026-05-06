@@ -1,0 +1,26 @@
+# build artifacts
+build/
+bin/ChatClient
+bin/ChatServer
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+*.o
+*.a
+*.so
+*.log
+core.*
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# env / secrets
+.env
+*.pem
+*.key
+
+# benchmark output
+benchmark/results/
