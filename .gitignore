@@ -29,3 +29,4 @@ benchmark/results/
 # Python caches
 __pycache__/
 *.pyc
+bin/
