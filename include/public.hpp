@@ -20,7 +20,7 @@ enum EnMsgType
     GROUP_CHAT_MSG,      // 群聊天
 
     MSG_ACK = 11,        // 客户端确认收到可靠消息
-    HEARTBEAT_MSG = 12   // 预留：心跳保活
+    HEARTBEAT_MSG = 12   // 心跳保活
 };
 
 #endif

@@ -43,6 +43,8 @@ public:
     void groupChat(const TcpConnectionPtr &conn, json &js, Timestamp time);
     // 处理可靠消息 ACK
     void messageAck(const TcpConnectionPtr &conn, json &js, Timestamp time);
+    // 处理心跳保活
+    void heartbeat(const TcpConnectionPtr &conn, json &js, Timestamp time);
     // 处理注销业务
     void loginout(const TcpConnectionPtr &conn, json &js, Timestamp time);
     // 处理客户端异常退出
@@ -56,6 +58,7 @@ public:
 
 private:
     ChatService();
+    bool isConnectionBoundToUser(int userid, const TcpConnectionPtr &conn);
 
     // 存储消息id和其对应的业务处理方法
     unordered_map<int, MsgHandler> _msgHandlerMap;

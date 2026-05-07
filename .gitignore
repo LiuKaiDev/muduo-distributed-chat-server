@@ -19,8 +19,13 @@ core.*
 
 # env / secrets
 .env
+config/server.env
 *.pem
 *.key
 
 # benchmark output
 benchmark/results/
+
+# Python caches
+__pycache__/
+*.pyc

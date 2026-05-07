@@ -2,6 +2,7 @@
 #include "db.h"
 #include <cstdlib>
 #include <cstdio>
+#include <algorithm>
 
 bool MessageModel::insert(long long messageid, int senderid, int receiverid, int groupid, int msgtype, const string &payload)
 {
@@ -12,11 +13,14 @@ bool MessageModel::insert(long long messageid, int senderid, int receiverid, int
     }
 
     string escapedPayload = mysql.escapeString(payload);
-    char sql[8192] = {0};
-    snprintf(sql, sizeof(sql),
-             "insert into chat_message(message_id, sender_id, receiver_id, group_id, msg_type, payload, status) "
-             "values(%lld, %d, %d, %d, %d, '%s', %d)",
-             messageid, senderid, receiverid, groupid, msgtype, escapedPayload.c_str(), MessageStatus::CREATED);
+    string sql = "insert into chat_message(message_id, sender_id, receiver_id, group_id, msg_type, payload, status) values(" +
+                 to_string(messageid) + ", " +
+                 to_string(senderid) + ", " +
+                 to_string(receiverid) + ", " +
+                 to_string(groupid) + ", " +
+                 to_string(msgtype) + ", '" +
+                 escapedPayload + "', " +
+                 to_string(MessageStatus::CREATED) + ")";
     return mysql.update(sql);
 }
 
@@ -55,6 +59,8 @@ bool MessageModel::ack(long long messageid, int receiverid)
 
 vector<StoredMessage> MessageModel::queryUnacked(int receiverid, int limit)
 {
+    limit = std::max(1, std::min(limit, 5000));
+
     char sql[1024] = {0};
     snprintf(sql, sizeof(sql),
              "select message_id, payload, status from chat_message "

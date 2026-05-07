@@ -1,17 +1,19 @@
 #include "groupmodel.hpp"
 #include "db.h"
+#include <cstdio>
 
 // 创建群组
 bool GroupModel::createGroup(Group &group)
 {
-    // 1.组装sql语句
-    char sql[1024] = {0};
-    sprintf(sql, "insert into allgroup(groupname, groupdesc) values('%s', '%s')",
-            group.getName().c_str(), group.getDesc().c_str());
-
     MySQL mysql;
     if (mysql.connect())
     {
+        string name = mysql.escapeString(group.getName());
+        string desc = mysql.escapeString(group.getDesc());
+
+        char sql[2048] = {0};
+        snprintf(sql, sizeof(sql), "insert into allgroup(groupname, groupdesc) values('%s', '%s')",
+                 name.c_str(), desc.c_str());
         if (mysql.update(sql))
         {
             group.setId(mysql_insert_id(mysql.getConnection()));
@@ -25,14 +27,13 @@ bool GroupModel::createGroup(Group &group)
 // 加入群组
 void GroupModel::addGroup(int userid, int groupid, string role)
 {
-    // 1.组装sql语句
-    char sql[1024] = {0};
-    sprintf(sql, "insert into groupuser values(%d, %d, '%s')",
-            groupid, userid, role.c_str());
-
     MySQL mysql;
     if (mysql.connect())
     {
+        string escapedRole = mysql.escapeString(role);
+        char sql[1024] = {0};
+        snprintf(sql, sizeof(sql), "insert ignore into groupuser values(%d, %d, '%s')",
+                 groupid, userid, escapedRole.c_str());
         mysql.update(sql);
     }
 }
@@ -45,9 +46,9 @@ vector<Group> GroupModel::queryGroups(int userid)
     2. 在根据群组信息，查询属于该群组的所有用户的userid，并且和user表进行多表联合查询，查出用户的详细信息
     */
     char sql[1024] = {0};
-    sprintf(sql, "select a.id,a.groupname,a.groupdesc from allgroup a inner join \
+    snprintf(sql, sizeof(sql), "select a.id,a.groupname,a.groupdesc from allgroup a inner join \
          groupuser b on a.id = b.groupid where b.userid=%d",
-            userid);
+             userid);
 
     vector<Group> groupVec;
 
@@ -74,9 +75,9 @@ vector<Group> GroupModel::queryGroups(int userid)
     // 查询群组的用户信息
     for (Group &group : groupVec)
     {
-        sprintf(sql, "select a.id,a.name,a.state,b.grouprole from user a \
+        snprintf(sql, sizeof(sql), "select a.id,a.name,a.state,b.grouprole from user a \
             inner join groupuser b on b.userid = a.id where b.groupid=%d",
-                group.getId());
+                 group.getId());
 
         MYSQL_RES *res = mysql.query(sql);
         if (res != nullptr)
@@ -101,7 +102,10 @@ vector<Group> GroupModel::queryGroups(int userid)
 vector<int> GroupModel::queryGroupUsers(int userid, int groupid)
 {
     char sql[1024] = {0};
-    sprintf(sql, "select userid from groupuser where groupid = %d and userid != %d", groupid, userid);
+    snprintf(sql, sizeof(sql),
+             "select userid from groupuser where groupid = %d and userid != %d "
+             "and exists (select 1 from groupuser where groupid = %d and userid = %d)",
+             groupid, userid, groupid, userid);
 
     vector<int> idVec;
     MySQL mysql;

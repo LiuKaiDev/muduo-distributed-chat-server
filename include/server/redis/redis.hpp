@@ -1,30 +1,24 @@
 #ifndef REDIS_H
 #define REDIS_H
 
-#include <hiredis/hiredis.h> // 这是 Redis 的 C 客户端库头文件。
+#include <hiredis/hiredis.h>
 #include <thread>
 #include <functional>
+#include <string>
 using namespace std;
 
-/*
-redis作为集群服务器通信的基于发布-订阅消息队列时，会遇到两个难搞的bug问题，参考我的博客详细描述：
-https://blog.csdn.net/QIANGWEIYUAN/article/details/97895611
-
-
-每个用户登录到某台服务器后，这台服务器会订阅该用户 id 对应的 Redis 通道。
-后续如果其他服务器要给这个用户转发消息，就会根据消息里的 toid，把消息 publish 到 toid 对应的通道；
-订阅了这个通道的服务器收到消息后，再把消息转发给本机这个用户的连接。
-*/
+// Redis Pub/Sub 封装：每个在线用户使用 userid 作为 channel，支持跨节点消息转发。
 class Redis
 {
 public:
     Redis();
     ~Redis();
 
-    // 连接redis服务器 
+    // 连接redis服务器
     bool connect();
+    bool isConnected() const;
 
-    // 向redis指定的通道channel发布消息 
+    // 向redis指定的通道channel发布消息
     bool publish(int channel, string message);
 
     // 向redis指定的通道subscribe订阅消息
@@ -49,11 +43,15 @@ public:
     void init_notify_handler(function<void(int, string)> fn);
 
 private:
+    bool sendSubscribeCommand(const char *command, int channel);
+
     // hiredis同步上下文对象，负责publish消息
     redisContext *_publish_context;
 
     // hiredis同步上下文对象，负责subscribe消息
-    redisContext *_subcribe_context;
+    redisContext *_subscribe_context;
+
+    bool _connected;
 
     // 回调操作，收到订阅的消息，给service层上报
     function<void(int, string)> _notify_message_handler;

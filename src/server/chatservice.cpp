@@ -2,7 +2,9 @@
 #include "public.hpp"
 #include <muduo/base/Logging.h>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <climits>
 #include <unistd.h>
 #include <cstdlib>
 #include <vector>
@@ -40,23 +42,110 @@ void sendFrame(const TcpConnectionPtr &conn, const string &payload)
     }
 }
 
+bool getInt(const json &js, const string &key, int &value)
+{
+    if (!js.contains(key))
+    {
+        return false;
+    }
+    if (js[key].is_number_integer())
+    {
+        long long parsed = js[key].get<long long>();
+        if (parsed < INT_MIN || parsed > INT_MAX)
+        {
+            return false;
+        }
+        value = static_cast<int>(parsed);
+        return true;
+    }
+    if (js[key].is_number_unsigned())
+    {
+        unsigned long long parsed = js[key].get<unsigned long long>();
+        if (parsed > static_cast<unsigned long long>(INT_MAX))
+        {
+            return false;
+        }
+        value = static_cast<int>(parsed);
+        return true;
+    }
+    if (js[key].is_string())
+    {
+        string raw = js[key].get<string>();
+        if (raw.empty())
+        {
+            return false;
+        }
+        char *end = nullptr;
+        errno = 0;
+        long parsed = strtol(raw.c_str(), &end, 10);
+        if (errno != 0 || end == raw.c_str() || *end != '\0' || parsed < INT_MIN || parsed > INT_MAX)
+        {
+            return false;
+        }
+        value = static_cast<int>(parsed);
+        return true;
+    }
+    return false;
+}
+
 bool getLongLong(const json &js, const string &key, long long &value)
 {
     if (!js.contains(key))
     {
         return false;
     }
-    if (js[key].is_number_integer() || js[key].is_number_unsigned())
+    if (js[key].is_number_integer())
     {
         value = js[key].get<long long>();
         return true;
     }
+    if (js[key].is_number_unsigned())
+    {
+        unsigned long long parsed = js[key].get<unsigned long long>();
+        if (parsed > static_cast<unsigned long long>(LLONG_MAX))
+        {
+            return false;
+        }
+        value = static_cast<long long>(parsed);
+        return true;
+    }
     if (js[key].is_string())
     {
-        value = atoll(js[key].get<string>().c_str());
+        string raw = js[key].get<string>();
+        if (raw.empty())
+        {
+            return false;
+        }
+        char *end = nullptr;
+        errno = 0;
+        long long parsed = strtoll(raw.c_str(), &end, 10);
+        if (errno != 0 || end == raw.c_str() || *end != '\0')
+        {
+            return false;
+        }
+        value = parsed;
         return true;
     }
     return false;
+}
+
+bool getString(const json &js, const string &key, string &value)
+{
+    if (!js.contains(key) || !js[key].is_string())
+    {
+        return false;
+    }
+    value = js[key].get<string>();
+    return true;
+}
+
+void sendErrorResponse(const TcpConnectionPtr &conn, int msgid, const string &errmsg)
+{
+    json response;
+    response["msgid"] = msgid;
+    response["errno"] = 1;
+    response["errmsg"] = errmsg;
+    sendJson(conn, response);
 }
 }
 
@@ -80,10 +169,15 @@ ChatService::ChatService()
     _msgHandlerMap.insert({ADD_GROUP_MSG, std::bind(&ChatService::addGroup, this, _1, _2, _3)});
     _msgHandlerMap.insert({GROUP_CHAT_MSG, std::bind(&ChatService::groupChat, this, _1, _2, _3)});
     _msgHandlerMap.insert({MSG_ACK, std::bind(&ChatService::messageAck, this, _1, _2, _3)});
+    _msgHandlerMap.insert({HEARTBEAT_MSG, std::bind(&ChatService::heartbeat, this, _1, _2, _3)});
 
     if (_redis.connect())
     {
         _redis.init_notify_handler(std::bind(&ChatService::handleRedisSubscribeMessage, this, _1, _2));
+    }
+    else
+    {
+        LOG_WARN << "redis is unavailable, cross-node forwarding will be disabled";
     }
 }
 
@@ -106,11 +200,23 @@ MsgHandler ChatService::getHandler(int msgid)
     return it->second;
 }
 
+bool ChatService::isConnectionBoundToUser(int userid, const TcpConnectionPtr &conn)
+{
+    lock_guard<mutex> lock(_connMutex);
+    auto it = _userConnMap.find(userid);
+    return it != _userConnMap.end() && it->second == conn;
+}
+
 // 处理登录业务  id  password
 void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int id = js["id"].get<int>();
-    string pwd = js["password"];
+    int id = 0;
+    string pwd;
+    if (!getInt(js, "id", id) || !getString(js, "password", pwd))
+    {
+        sendErrorResponse(conn, LOGIN_MSG_ACK, "invalid login request");
+        return;
+    }
 
     User user = _userModel.query(id);
     if (user.getId() == id && user.getPwd() == pwd)
@@ -127,10 +233,20 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
 
         {
             lock_guard<mutex> lock(_connMutex);
-            _userConnMap.insert({id, conn});
+            _userConnMap[id] = conn;
         }
 
-        _redis.subscribe(id);
+        if (_redis.isConnected())
+        {
+            if (!_redis.subscribe(id))
+            {
+                LOG_WARN << "subscribe redis channel failed, userid=" << id;
+            }
+        }
+        else
+        {
+            LOG_WARN << "skip redis subscribe because redis is unavailable, userid=" << id;
+        }
 
         user.setState("online");
         _userModel.updateState(user);
@@ -225,8 +341,13 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
 // 处理注册业务  name  password
 void ChatService::reg(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    string name = js["name"];
-    string pwd = js["password"];
+    string name;
+    string pwd;
+    if (!getString(js, "name", name) || !getString(js, "password", pwd) || name.empty() || pwd.empty())
+    {
+        sendErrorResponse(conn, REG_MSG_ACK, "invalid register request");
+        return;
+    }
 
     User user;
     user.setName(name);
@@ -249,7 +370,17 @@ void ChatService::reg(const TcpConnectionPtr &conn, json &js, Timestamp time)
 // 处理注销业务
 void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
+    int userid = 0;
+    if (!getInt(js, "id", userid))
+    {
+        LOG_WARN << "invalid loginout request";
+        return;
+    }
+    if (!isConnectionBoundToUser(userid, conn))
+    {
+        LOG_WARN << "reject loginout from unbound connection, userid=" << userid;
+        return;
+    }
 
     {
         lock_guard<mutex> lock(_connMutex);
@@ -260,7 +391,10 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
         }
     }
 
-    _redis.unsubscribe(userid);
+    if (_redis.isConnected())
+    {
+        _redis.unsubscribe(userid);
+    }
 
     User user(userid, "", "", "offline");
     _userModel.updateState(user);
@@ -285,7 +419,10 @@ void ChatService::clientCloseException(const TcpConnectionPtr &conn)
 
     if (user.getId() != -1)
     {
-        _redis.unsubscribe(user.getId());
+        if (_redis.isConnected())
+        {
+            _redis.unsubscribe(user.getId());
+        }
         user.setState("offline");
         _userModel.updateState(user);
     }
@@ -294,13 +431,29 @@ void ChatService::clientCloseException(const TcpConnectionPtr &conn)
 // 一对一聊天业务：入库 -> 本机投递 / Redis跨节点投递 / 等待接收者重连同步
 void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int fromid = js["id"].get<int>();
-    int toid = js["toid"].get<int>();
+    int fromid = 0;
+    int toid = 0;
+    string message;
+    if (!getInt(js, "id", fromid) || !getInt(js, "toid", toid) || !getString(js, "msg", message))
+    {
+        LOG_WARN << "invalid one chat request";
+        return;
+    }
+    if (!isConnectionBoundToUser(fromid, conn))
+    {
+        LOG_WARN << "reject one chat from unbound connection, userid=" << fromid;
+        return;
+    }
+
     long long messageid = generateMessageId();
     js["messageid"] = messageid;
     js["need_ack"] = true;
 
-    _messageModel.insert(messageid, fromid, toid, 0, ONE_CHAT_MSG, js.dump());
+    if (!_messageModel.insert(messageid, fromid, toid, 0, ONE_CHAT_MSG, js.dump()))
+    {
+        LOG_ERROR << "persist one chat message failed, messageid=" << messageid;
+        return;
+    }
 
     {
         lock_guard<mutex> lock(_connMutex);
@@ -316,7 +469,11 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
     User user = _userModel.query(toid);
     if (user.getState() == "online")
     {
-        _redis.publish(toid, js.dump());
+        if (_redis.isConnected() && _redis.publish(toid, js.dump()))
+        {
+            return;
+        }
+        LOG_WARN << "publish one chat message failed, keep message for reconnect sync, messageid=" << messageid;
         return;
     }
 
@@ -327,8 +484,18 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
 // 添加好友业务 msgid id friendid
 void ChatService::addFriend(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
-    int friendid = js["friendid"].get<int>();
+    int userid = 0;
+    int friendid = 0;
+    if (!getInt(js, "id", userid) || !getInt(js, "friendid", friendid))
+    {
+        LOG_WARN << "invalid add friend request";
+        return;
+    }
+    if (!isConnectionBoundToUser(userid, conn))
+    {
+        LOG_WARN << "reject add friend from unbound connection, userid=" << userid;
+        return;
+    }
 
     _friendModel.insert(userid, friendid);
 }
@@ -336,9 +503,19 @@ void ChatService::addFriend(const TcpConnectionPtr &conn, json &js, Timestamp ti
 // 创建群组业务
 void ChatService::createGroup(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
-    string name = js["groupname"];
-    string desc = js["groupdesc"];
+    int userid = 0;
+    string name;
+    string desc;
+    if (!getInt(js, "id", userid) || !getString(js, "groupname", name) || !getString(js, "groupdesc", desc) || name.empty())
+    {
+        LOG_WARN << "invalid create group request";
+        return;
+    }
+    if (!isConnectionBoundToUser(userid, conn))
+    {
+        LOG_WARN << "reject create group from unbound connection, userid=" << userid;
+        return;
+    }
 
     Group group(-1, name, desc);
     if (_groupModel.createGroup(group))
@@ -350,16 +527,38 @@ void ChatService::createGroup(const TcpConnectionPtr &conn, json &js, Timestamp 
 // 加入群组业务
 void ChatService::addGroup(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
-    int groupid = js["groupid"].get<int>();
+    int userid = 0;
+    int groupid = 0;
+    if (!getInt(js, "id", userid) || !getInt(js, "groupid", groupid))
+    {
+        LOG_WARN << "invalid add group request";
+        return;
+    }
+    if (!isConnectionBoundToUser(userid, conn))
+    {
+        LOG_WARN << "reject add group from unbound connection, userid=" << userid;
+        return;
+    }
     _groupModel.addGroup(userid, groupid, "normal");
 }
 
 // 群组聊天业务：为每个接收者单独生成消息ID，便于按人 ACK 和重连同步
 void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
-    int groupid = js["groupid"].get<int>();
+    int userid = 0;
+    int groupid = 0;
+    string message;
+    if (!getInt(js, "id", userid) || !getInt(js, "groupid", groupid) || !getString(js, "msg", message))
+    {
+        LOG_WARN << "invalid group chat request";
+        return;
+    }
+    if (!isConnectionBoundToUser(userid, conn))
+    {
+        LOG_WARN << "reject group chat from unbound connection, userid=" << userid;
+        return;
+    }
+
     vector<int> useridVec = _groupModel.queryGroupUsers(userid, groupid);
 
     for (int id : useridVec)
@@ -369,7 +568,11 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
         msg["messageid"] = messageid;
         msg["toid"] = id;
         msg["need_ack"] = true;
-        _messageModel.insert(messageid, userid, id, groupid, GROUP_CHAT_MSG, msg.dump());
+        if (!_messageModel.insert(messageid, userid, id, groupid, GROUP_CHAT_MSG, msg.dump()))
+        {
+            LOG_ERROR << "persist group chat message failed, messageid=" << messageid;
+            continue;
+        }
 
         bool deliveredByLocalConnection = false;
         {
@@ -390,14 +593,28 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
         User user = _userModel.query(id);
         if (user.getState() == "online")
         {
-            _redis.publish(id, msg.dump());
+            if (!_redis.isConnected() || !_redis.publish(id, msg.dump()))
+            {
+                LOG_WARN << "publish group chat message failed, keep message for reconnect sync, messageid=" << messageid;
+            }
         }
     }
 }
 
 void ChatService::messageAck(const TcpConnectionPtr &conn, json &js, Timestamp time)
 {
-    int userid = js["id"].get<int>();
+    int userid = 0;
+    if (!getInt(js, "id", userid))
+    {
+        LOG_ERROR << "invalid ACK without userid";
+        return;
+    }
+    if (!isConnectionBoundToUser(userid, conn))
+    {
+        LOG_WARN << "reject ACK from unbound connection, userid=" << userid;
+        return;
+    }
+
     long long messageid = 0;
     if (!getLongLong(js, "messageid", messageid))
     {
@@ -405,6 +622,22 @@ void ChatService::messageAck(const TcpConnectionPtr &conn, json &js, Timestamp t
         return;
     }
     _messageModel.ack(messageid, userid);
+}
+
+void ChatService::heartbeat(const TcpConnectionPtr &conn, json &js, Timestamp time)
+{
+    json response;
+    response["msgid"] = HEARTBEAT_MSG;
+    response["errno"] = 0;
+    response["server_time"] = time.toFormattedString(false);
+
+    int userid = 0;
+    if (getInt(js, "id", userid))
+    {
+        response["id"] = userid;
+    }
+
+    sendJson(conn, response);
 }
 
 // 从redis消息队列中获取订阅的消息

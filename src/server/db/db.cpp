@@ -1,5 +1,7 @@
 #include "db.h"
 #include <muduo/base/Logging.h>
+#include <cerrno>
+#include <climits>
 #include <cstdlib>
 
 static string getEnvOrDefault(const char *key, const string &defaultValue)
@@ -19,7 +21,14 @@ static unsigned int getEnvPortOrDefault(const char *key, unsigned int defaultVal
     {
         return defaultValue;
     }
-    return static_cast<unsigned int>(atoi(value));
+    char *end = nullptr;
+    errno = 0;
+    long parsed = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed <= 0 || parsed > 65535)
+    {
+        return defaultValue;
+    }
+    return static_cast<unsigned int>(parsed);
 }
 
 // 初始化数据库连接
@@ -38,17 +47,23 @@ MySQL::~MySQL()
 // 连接数据库
 bool MySQL::connect()
 {
+    if (_conn == nullptr)
+    {
+        LOG_ERROR << "mysql init failed";
+        return false;
+    }
+
     string server = getEnvOrDefault("CHAT_DB_HOST", "127.0.0.1");
     string user = getEnvOrDefault("CHAT_DB_USER", "root");
     string password = getEnvOrDefault("CHAT_DB_PASSWORD", "123456");
     string dbname = getEnvOrDefault("CHAT_DB_NAME", "chat");
     unsigned int port = getEnvPortOrDefault("CHAT_DB_PORT", 3306);
 
+    mysql_options(_conn, MYSQL_SET_CHARSET_NAME, "utf8mb4");
     MYSQL *p = mysql_real_connect(_conn, server.c_str(), user.c_str(),
                                   password.c_str(), dbname.c_str(), port, nullptr, 0);
     if (p != nullptr)
     {
-        mysql_query(_conn, "set names utf8mb4");
         LOG_INFO << "connect mysql success!";
     }
     else
@@ -82,7 +97,7 @@ MYSQL_RES *MySQL::query(string sql)
         return nullptr;
     }
 
-    return mysql_use_result(_conn);
+    return mysql_store_result(_conn);
 }
 
 // 获取连接

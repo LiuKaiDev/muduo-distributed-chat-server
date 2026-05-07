@@ -10,6 +10,7 @@
 #include <exception>
 #include <cstring>
 #include <cerrno>
+#include <mutex>
 using namespace std;
 using json = nlohmann::json;
 
@@ -33,17 +34,19 @@ vector<User> g_currentUserFriendList;
 vector<Group> g_currentUserGroupList;
 
 // 控制主菜单页面程序
-bool isMainMenuRunning = false;
+atomic_bool isMainMenuRunning{false};
 
 // 用于读写线程之间的通信
 sem_t rwsem;
 // 记录登录状态
 atomic_bool g_isLoginSuccess{false};
 int g_clientfd = -1;
+mutex g_sendMutex;
 
 // 发送一行一个JSON帧，解决TCP粘包/拆包问题
 bool sendJsonFrame(int clientfd, const json &js)
 {
+    lock_guard<mutex> lock(g_sendMutex);
     string data = js.dump();
     data.push_back('\n');
     const char *ptr = data.data();
@@ -77,6 +80,8 @@ void ackMessageIfNeeded(int clientfd, const json &js)
 
 // 接收线程
 void readTaskHandler(int clientfd);
+// 心跳线程
+void heartbeatTaskHandler(int clientfd);
 // 获取系统时间（聊天信息需要添加时间信息）
 string getCurrentTime();
 // 主聊天页面程序
@@ -129,6 +134,8 @@ int main(int argc, char **argv)
     // 连接服务器成功，启动接收子线程
     std::thread readTask(readTaskHandler, clientfd); // pthread_create
     readTask.detach();                               // pthread_detach
+    std::thread heartbeatTask(heartbeatTaskHandler, clientfd);
+    heartbeatTask.detach();
 
     // main线程用于接收用户输入，负责发送数据
     for (;;)
@@ -216,7 +223,7 @@ void doRegResponse(json &responsejs)
 {
     if (0 != responsejs["errno"].get<int>()) // 注册失败
     {
-        cerr << "name is already exist, register error!" << endl;
+        cerr << "register error!" << endl;
     }
     else // 注册成功
     {
@@ -387,7 +394,30 @@ void readTaskHandler(int clientfd)
                 sem_post(&rwsem);
                 continue;
             }
+
+            if (HEARTBEAT_MSG == msgtype)
+            {
+                continue;
+            }
         }
+    }
+}
+
+// 子线程 - 心跳保活线程
+void heartbeatTaskHandler(int clientfd)
+{
+    for (;;)
+    {
+        this_thread::sleep_for(chrono::seconds(30));
+        if (!isMainMenuRunning.load() || g_currentUser.getId() == -1)
+        {
+            continue;
+        }
+
+        json js;
+        js["msgid"] = HEARTBEAT_MSG;
+        js["id"] = g_currentUser.getId();
+        sendJsonFrame(clientfd, js);
     }
 }
 
@@ -461,7 +491,7 @@ void mainMenu(int clientfd)
     help();
 
     char buffer[1024] = {0};
-    while (isMainMenuRunning)
+    while (isMainMenuRunning.load())
     {
         cin.getline(buffer, 1024);
         string commandbuf(buffer);
