@@ -87,7 +87,7 @@ class BenchClient:
         try:
             self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
             self.metrics.connected += 1
-            self.read_task = asyncio.create_task(self.read_loop())
+            self.read_task = asyncio.ensure_future(self.read_loop())
             return True
         except Exception:
             self.metrics.connect_failed += 1
@@ -288,4 +288,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
