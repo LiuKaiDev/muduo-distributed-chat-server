@@ -258,7 +258,6 @@ python3 benchmark/bench_client.py \
 
 - [架构说明](docs/architecture.md)
 - [应用层协议](docs/protocol.md)
-- [基础测试说明](docs/perf-test.md)
 
 ---
 
