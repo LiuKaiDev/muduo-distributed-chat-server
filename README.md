@@ -14,7 +14,7 @@
 
 ## 架构图
 
-![Uploading 1.png…]()
+![系统架构图](images/architecture.png)
 
 
 用户登录到某个 ChatServer 后，该节点维护 `userid -> TcpConnection` 的本地连接映射，并订阅 Redis 中以 `userid` 命名的 channel。
