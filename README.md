@@ -134,7 +134,6 @@ CHAT_REDIS_PASSWORD=
 CHAT_REDIS_DB=0
 ```
 
-注意：`config/server.env` 包含本地数据库密码，不建议提交到 GitHub。仓库中只保留 `config/server.env.example`。
 
 ### 4. 编译
 
