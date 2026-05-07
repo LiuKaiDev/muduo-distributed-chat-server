@@ -266,7 +266,6 @@ python3 benchmark/bench_client.py \
 ## 后续优化方向
 
 - 将当前 `JSON + '\n'` 协议升级为 `固定长度消息头 + JSON Body`
-- 增加 Docker Compose，一键启动 MySQL、Redis、Nginx 和 ChatServer
 - 优化客户端输入校验，避免非法输入导致客户端异常
 - 优化可靠消息投递链路，支持 ACK 批量更新和异常重试
 - 增加 CI 构建检查，保证代码提交后能够自动编译验证
